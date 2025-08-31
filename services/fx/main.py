@@ -1,128 +1,147 @@
-import os, json, time, sqlite3
-from fastapi import FastAPI
+import os
+import json
+import time
+import sqlite3
+from pathlib import Path
+from typing import Optional, Tuple
 
-app = FastAPI(title="fx")
+import httpx
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
+APP_TITLE = "fx"
+app = FastAPI(title=APP_TITLE)
+
+# ---------- config ----------
+PORT = int(os.getenv("PORT", "8000"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "info")
+
+# Support either FX_CACHE_PATH or DB_PATH. Prefer FX_CACHE_PATH if set.
+_db_path_env = os.getenv("FX_CACHE_PATH") or os.getenv("DB_PATH") or "fx_cache.sqlite"
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DATA_DIR / Path(_db_path_env).name
+
+FX_TTL_SEC = int(os.getenv("FX_TTL_SEC", str(6 * 60 * 60)))  # default 6h
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "4.0"))
+EODHD_KEY = os.getenv("EODHD_KEY", "").strip()
+
+EODHD_BASE = "https://eodhd.com/api/real-time"
+SYMBOL_EURUSD = "EURUSD.FOREX"  # EODHD symbol for EUR/USD
+
+# ---------- models ----------
+class FxResp(BaseModel):
+    pair: str          # e.g. USD_EUR
+    rate: float
+    source: str
+    fetched_at: int    # unix seconds
+    ttl_sec: int
+
+# ---------- sqlite cache ----------
+def _db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fx_cache(
+            key TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+    """)
+    return conn
+
+def cache_get(key: str) -> Optional[dict]:
+    conn = _db()
+    try:
+        row = conn.execute(
+            "SELECT payload, expires_at FROM fx_cache WHERE key=?",
+            (key,),
+        ).fetchone()
+        if not row:
+            return None
+        payload_json, expires_at = row
+        now = int(time.time())
+        if now >= expires_at:
+            return None
+        return json.loads(payload_json)
+    finally:
+        conn.close()
+
+def cache_put(key: str, payload: dict):
+    conn = _db()
+    try:
+        expires_at = int(time.time()) + FX_TTL_SEC
+        conn.execute(
+            "INSERT OR REPLACE INTO fx_cache(key, payload, expires_at) VALUES (?, ?, ?)",
+            (key, json.dumps(payload), expires_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+# ---------- provider: EODHD ----------
+async def fetch_usd_eur_eodhd() -> Tuple[Optional[float], Optional[str]]:
+    """
+    EODHD returns EURUSD price (USD per 1 EUR).
+    We need USD_EUR, so we return 1 / EURUSD.
+    """
+    if not EODHD_KEY:
+        return None, "missing_eodhd_key"
+
+    url = f"{EODHD_BASE}/{SYMBOL_EURUSD}"
+    params = {"api_token": EODHD_KEY, "fmt": "json"}
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        r = await client.get(url, params=params)
+        if r.status_code != 200:
+            return None, f"eodhd_http_{r.status_code}"
+        js = r.json()
+        # EODHD returns {"code": "...", "timestamp": ..., "gmtoffset":..., "open":..., "high":..., "low":..., "close":..., "previousClose":..., "change":..., "change_p":...}
+        # Use "close" as the latest price
+        eurusd = js.get("close") or js.get("price") or js.get("last")  # defensive
+        try:
+            eurusd = float(eurusd)
+        except Exception:
+            return None, "eodhd_no_price"
+        if eurusd <= 0:
+            return None, "eodhd_bad_price"
+        usd_eur = 1.0 / eurusd
+        return usd_eur, "eodhd.com real-time"
+    # unreachable
+
+# ---------- endpoints ----------
 @app.get("/health")
 def health():
     return {"ok": True}
 
+@app.get("/fx/cache/{key}")
+def get_cache_item(key: str):
+    item = cache_get(key.upper())
+    return {"key": key.upper(), "cached": bool(item), "value": item}
+
 @app.get("/fx/usd-eur")
-def usd_eur():
-    return {"pair": "USD/EUR", "rate": 0.90}
-
-from pydantic import BaseModel
-import httpx
-
-EODHD_KEY = os.getenv("EODHD_KEY", "")
-FX_TTL_SEC = int(os.getenv("FX_TTL_SEC", "86400"))  # 24h cache
-DB_PATH = os.getenv("DB_PATH", "cache.db")
-
-app = FastAPI(title="FX Service")
-
-def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS cache("
-        "k TEXT PRIMARY KEY, v TEXT NOT NULL, ts INTEGER NOT NULL)"
-    )
-    return conn
-
-def cache_get(k: str, ttl: int):
-    conn = db()
-    row = conn.execute("SELECT v, ts FROM cache WHERE k=?", (k,)).fetchone()
-    conn.close()
-    if not row:
-        return None
-    v, ts = row
-    if time.time() - ts > ttl:
-        return None
-    return json.loads(v)
-
-def cache_put(k: str, v: dict):
-    conn = db()
-    conn.execute(
-        "REPLACE INTO cache(k, v, ts) VALUES(?,?,?)",
-        (k, json.dumps(v), int(time.time())),
-    )
-    conn.commit()
-    conn.close()
-
-class FxResp(BaseModel):
-    pair: str
-    rate: float          # EUR per 1 USD
-    source: str
-    fetched_at: int
-    ttl_sec: int
-
-@app.get("/health")
-def health():
-    return {"ok": True, "ts": int(time.time())}
-
-async def fetch_usdeur_from_eodhd(client: httpx.AsyncClient) -> float | None:
+async def usd_eur(force: int = 0):
     """
-    Use EODHD real-time for EURUSD.FOREX and invert:
-      EURUSD close = USD per EUR  => USD_EUR = 1 / close
+    Returns USD to EUR rate with cache.
+    Query param force=1 bypasses cache and refetches from EODHD.
     """
-    if not EODHD_KEY:
-        return None
-    url = f"https://eodhd.com/api/real-time/EURUSD.FOREX?api_token={EODHD_KEY}&fmt=json"
-    try:
-        r = await client.get(url, timeout=12)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        # some responses are list-like; normalize
-        if isinstance(data, list) and data:
-            data = data[0]
-        close = float(data.get("close") or 0)
-        if close <= 0:
-            return None
-        return 1.0 / close
-    except Exception:
-        return None
+    key = "USD_EUR"
 
-async def fetch_usdeur_from_ecb(client: httpx.AsyncClient) -> float | None:
-    """
-    Fallback via exchangerate.host (ECB based): base=USD&symbols=EUR already returns USD->EUR
-    """
-    try:
-        r = await client.get("https://api.exchangerate.host/latest?base=USD&symbols=EUR", timeout=12)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        rate = data.get("rates", {}).get("EUR")
-        return float(rate) if rate and float(rate) > 0 else None
-    except Exception:
-        return None
-
-@app.get("/fx", response_model=FxResp)
-async def fx(pair: str = "USD_EUR", force: bool = False):
-    if pair.upper() != "USD_EUR":
-        raise HTTPException(400, "only USD_EUR supported for now")
-
-    key = "fx:USD_EUR"
     if not force:
-        cached = cache_get(key, FX_TTL_SEC)
+        cached = cache_get(key)
         if cached:
-            return FxResp(**cached)
+            return cached
 
-    async with httpx.AsyncClient() as client:
-        rate = await fetch_usdeur_from_eodhd(client)
-        src = "eodhd"
-        if rate is None:
-            rate = await fetch_usdeur_from_ecb(client)
-            src = "exchangerate.host-ecb" if rate is not None else None
-
+    rate, src = await fetch_usd_eur_eodhd()
     if rate is None:
-        raise HTTPException(502, "Failed to fetch USD_EUR from both sources")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch USD_EUR: {src}")
 
     payload = FxResp(
-        pair="USD_EUR",
-        rate=rate,
-        source=src or "unknown",
+        pair=key,
+        rate=float(rate),
+        source=src or "eodhd.com",
         fetched_at=int(time.time()),
         ttl_sec=FX_TTL_SEC,
     ).dict()
+
     cache_put(key, payload)
     return payload

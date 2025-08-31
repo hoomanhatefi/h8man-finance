@@ -1,6 +1,7 @@
-/services/**/.env
+/.env
 /.env.prod
+/services/**/.env
+/services/**/data/*.db
 n8n_data/
 **/__pycache__/
 **/.pytest_cache/
-**/*.db

@@ -1,0 +1,62 @@
+services:
+  fx:
+    build:
+      context: ${ROOT}/services/fx
+    env_file:
+      - ${ROOT}/services/fx/.env
+    volumes:
+      - ${ROOT}/services/fx/data/cache.db:/app/cache.db
+
+  portfolio-logic:
+    build:
+      context: ${ROOT}/services/portfolio
+    env_file:
+      - ${ROOT}/services/portfolio/.env
+    ports:
+      - "8001:8000"
+    volumes:
+      - ${ROOT}/services/portfolio/data/cache.db:/app/cache.db
+    depends_on:
+      fx:
+        condition: service_healthy
+
+  sqliteweb:
+    image: coleifer/sqlite-web:latest
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ${ROOT}/services/portfolio/data/cache.db:/data/cache.db
+    command: ["-H", "0.0.0.0", "/data/cache.db"]
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - TZ=Europe/Berlin
+      - GENERIC_TIMEZONE=Europe/Berlin
+      - N8N_HOST=n8n.h8man.com
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://n8n.h8man.com/
+      - N8N_EDITOR_BASE_URL=https://n8n.h8man.com/
+      - N8N_TRUSTED_PROXIES=loopback
+      - N8N_RUNNERS_ENABLED=true
+      - DB_SQLITE_POOL_SIZE=5
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      fx:
+        condition: service_healthy
+      portfolio-logic:
+        condition: service_healthy
+
+volumes:
+  n8n_data:
+    external: true
+    name: n8n_n8n_data

@@ -1,5 +1,22 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
+import httpx
+
+app = FastAPI(title="portfolio-logic")
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/fx-check")
+async def fx_check():
+    base = os.getenv("FX_BASE_URL", "http://fx:8000")
+    async with httpx.AsyncClient(timeout=5) as client:
+        r = await client.get(f"{base}/health")
+        r.raise_for_status()
+        return {"fx": r.json()}
+
+
 from typing import Optional
 from models import TxIn, TxOut, Holding, PortfolioOut, PortfolioRow, PriceOut, SnapshotIn, CompareOut
 from storage import init_db, get_holdings, upsert_holding, record_tx

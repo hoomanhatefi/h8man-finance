@@ -1,5 +1,16 @@
 import os, json, time, sqlite3
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
+
+app = FastAPI(title="fx")
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/fx/usd-eur")
+def usd_eur():
+    return {"pair": "USD/EUR", "rate": 0.90}
+
 from pydantic import BaseModel
 import httpx
 

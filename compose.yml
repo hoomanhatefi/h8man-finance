@@ -4,8 +4,17 @@ services:
       context: ${ROOT}/services/fx
     env_file:
       - ${ROOT}/services/fx/.env
+    ports:
+      - "8000:8000"
     volumes:
-      - ${ROOT}/services/fx/data/cache.db:/app/cache.db
+      - ${ROOT}/services/fx/data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/health\")' || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
   portfolio-logic:
     build:
@@ -15,18 +24,28 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - ${ROOT}/services/portfolio/data/cache.db:/app/cache.db
+      - ${ROOT}/services/portfolio/data:/data
     depends_on:
       fx:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/health\")' || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
   sqliteweb:
     image: coleifer/sqlite-web:latest
     ports:
       - "127.0.0.1:8081:8080"
     volumes:
-      - ${ROOT}/services/portfolio/data/cache.db:/data/cache.db
-    command: ["-H", "0.0.0.0", "/data/cache.db"]
+      - ${ROOT}/services/portfolio/data:/data
+    command: ["sqlite_web", "-H", "0.0.0.0", "/data/cache.db"]
+    depends_on:
+      portfolio-logic:
+        condition: service_started
 
   n8n:
     image: n8nio/n8n:latest
@@ -40,10 +59,10 @@ services:
       - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
       - TZ=Europe/Berlin
       - GENERIC_TIMEZONE=Europe/Berlin
-      - N8N_HOST=n8n.h8man.com
+      - N8N_HOST=${N8N_HOST}
       - N8N_PROTOCOL=https
-      - WEBHOOK_URL=https://n8n.h8man.com/
-      - N8N_EDITOR_BASE_URL=https://n8n.h8man.com/
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - N8N_EDITOR_BASE_URL=${N8N_EDITOR_BASE_URL}
       - N8N_TRUSTED_PROXIES=loopback
       - N8N_RUNNERS_ENABLED=true
       - DB_SQLITE_POOL_SIZE=5

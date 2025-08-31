@@ -1,7 +1,8 @@
-/.env
-/.env.prod
-/services/**/.env
-/services/**/data/*.db
-n8n_data/
-**/__pycache__/
-**/.pytest_cache/
+.env
+.env.prod
+services/*/.env
+services/*/data/*
+__pycache__/
+*.pyc
+*.pyo
+node_modules/

@@ -1,7 +1,7 @@
 services:
   fx:
     build:
-      context: ${ROOT}/services/fx
+      context: ${ROOT}/h8man-finance/services/fx
     env_file:
       - ${ROOT}/services/fx/.env
     ports:
@@ -20,7 +20,7 @@ services:
     build:
       context: ${ROOT}/services/portfolio
     env_file:
-      - ${ROOT}/services/portfolio/.env
+      - ${ROOT}/h8man-finance/services/portfolio/.env
     ports:
       - "8001:8000"
     volumes:
